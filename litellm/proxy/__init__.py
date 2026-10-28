@@ -2,6 +2,7 @@ import importlib
 from types import ModuleType
 
 from . import *
+from . import _router_host as _router_host  # installs the proxy's RouterHost on import
 
 
 def __getattr__(name: str) -> ModuleType:

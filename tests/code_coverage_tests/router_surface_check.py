@@ -39,6 +39,7 @@ ROUTER_FILES = {
     "litellm/router.py",
     "litellm/router_api.py",
     "litellm/router_deprecated.py",
+    "litellm/router_host.py",
 }
 # Classes whose members count as Router members (Router and the mixins it is built from).
 ROUTER_CLASS_FILES = ["litellm/router.py", "litellm/router_deprecated.py"]
@@ -60,7 +61,7 @@ SKIP_DIRS = {
 
 RECEIVER = re.compile(
     r"(^|[._])(llm_router|router|litellm_router|litellm_router_instance|router_instance"
-    r"|_router|proxy_router|llm_router_instance|router_obj|mock_router)$"
+    r"|_router|proxy_router|llm_router_instance|router_obj|mock_router|Router)$"
 )
 DYNAMIC_FUNCS = {"getattr", "setattr", "hasattr"}
 
