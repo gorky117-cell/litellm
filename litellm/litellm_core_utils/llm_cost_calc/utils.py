@@ -13,7 +13,16 @@ from typing_extensions import ReadOnly
 
 import litellm
 from litellm._catalog import Invalid
-from litellm._cost import CallContext, Channel, Priced, Prices, Unpriced, as_main_cost, call_custom_pricing
+from litellm._cost import (
+    CallContext,
+    Channel,
+    ImageOut,
+    Priced,
+    Prices,
+    Unpriced,
+    as_main_cost,
+    call_custom_pricing,
+)
 from litellm._cost import Usage as TokenUsage
 from litellm._internal_context import current_billing_time
 from litellm._logging import verbose_logger
@@ -171,15 +180,6 @@ def get_web_search_requests_from_usage(usage: Usage) -> int | None:
     ``AttributeError``; ``getattr`` with a default is required here.
     """
     return get_web_search_requests(getattr(usage, "server_tool_use", None))
-
-
-def is_above_128k(tokens: float) -> bool:
-    if tokens > 128000:
-        return True
-    return False
-
-
-_is_above_128k = is_above_128k
 
 
 def get_billable_input_tokens(usage: Usage) -> int:
@@ -1228,47 +1228,6 @@ def _resolve_billed_reasoning_rate(
     )
 
 
-def generic_cost_per_token(
-    model: str,
-    usage: Usage,
-    custom_llm_provider: str,
-    service_tier: str | None = None,
-    data_residency: str | None = None,
-    model_info: ModelInfo | None = None,
-    vertex_location: str | None = None,
-    current_time: datetime | None = None,
-) -> tuple[float, float]:
-    """
-    Calculates the cost per token for a given model, prompt tokens, and completion tokens.
-
-    Handles context caching as well.
-
-    Input:
-        - model: str, the model name without provider prefix
-        - usage: LiteLLM Usage block, containing anthropic caching information
-        - data_residency: optional OpenAI data-residency region (e.g. "eu", "us"),
-          used to apply the per-model regional-processing uplift multiplier.
-        - vertex_location: optional Vertex AI location the request was served from
-          (e.g. "us-east5", "global"), used to apply the per-model
-          regional-endpoint uplift multiplier when non-global.
-        - current_time: the moment the request is billed at, for off_peak_pricing; defaults to now, UTC
-
-    Returns:
-        Tuple[float, float] - prompt_cost_in_usd, completion_cost_in_usd
-    """
-
-    return cost_per_text(
-        model,
-        usage,
-        custom_llm_provider,
-        service_tier=service_tier,
-        data_residency=data_residency,
-        model_info=model_info,
-        vertex_location=vertex_location,
-        current_time=current_time,
-    )
-
-
 def cost_per_text(
     model: str,
     usage: Usage,
@@ -1293,6 +1252,8 @@ def cost_per_text(
             data_residency=data_residency,
             vertex_location=vertex_location,
             current_time=current_time,
+            speed=_usage_str(usage, "speed"),
+            inference_geo=_usage_str(usage, "inference_geo"),
             key=model,
         )
     )
@@ -1311,6 +1272,8 @@ def price_usage(
     vertex_location: str | None = None,
     current_time: datetime | None = None,
     channel: Channel = "online",
+    speed: str | None = None,
+    inference_geo: str | None = None,
     key: str = "model_info",
 ) -> Priced | Unpriced | Invalid:
     """Prices ``usage`` over ``row`` with the call's custom pricing over it, the one place a cost is computed"""
@@ -1329,8 +1292,38 @@ def price_usage(
             vertex_location=vertex_location,
             at=current_time if current_time is not None else current_billing_time(),
             custom_pricing=None if custom_pricing is None else dict(custom_pricing),
+            speed=speed,
+            inference_geo=inference_geo,
         ),
     )
+
+
+def image_cost(
+    row: Mapping[str, object], images: int, width: int | None = None, height: int | None = None
+) -> float | None:
+    """``images`` images priced per image or per pixel over ``row``, None when it prices neither"""
+    priced: Final = price_usage(
+        row,
+        TokenUsage(
+            prompt_tokens=0,
+            text=0,
+            output_text=0,
+            images_out=[ImageOut(width=width, height=height)] * max(images, 0),
+        ),
+    )
+    return priced.total if isinstance(priced, Priced) and priced.lines else None
+
+
+def search_cost(model_info: Mapping[str, object], usage: TokenUsage) -> float:
+    """The search, grounding and tool meters of ``usage`` priced over ``model_info``"""
+    prompt_cost, completion_cost = as_main_cost(price_usage(model_info, usage))
+    return prompt_cost + completion_cost
+
+
+def _usage_str(usage: Usage, name: str) -> str | None:
+    """Anthropic's ``speed`` and ``inference_geo``, which pick the row's speed and geo uplifts"""
+    value: Final = getattr(usage, name, None)
+    return value if isinstance(value, str) else None
 
 
 def pricing_row(model: str, custom_llm_provider: str | None, model_info: ModelInfo | None) -> Mapping[str, object]:
@@ -1356,8 +1349,13 @@ def bills_characters(row: Mapping[str, object]) -> bool:
 
 
 def _without_tiers(row: Mapping[str, object]) -> dict[str, object]:
-    """main picks no tier for an empty prompt and bills the row's flat prices"""
-    return {name: value for name, value in row.items() if name != "tiered_pricing"}
+    """main picks no prompt-token tier for an empty prompt and bills the row's flat prices. A search row's result
+    tiers stay"""
+    tiers: Final = row.get("tiered_pricing")
+    token_tiers: Final = isinstance(tiers, list) and any(
+        isinstance(tier, Mapping) and "range" in tier for tier in tiers
+    )
+    return {name: value for name, value in row.items() if not (token_tiers and name == "tiered_pricing")}
 
 
 def _billable_prompt_details(usage: Usage) -> PromptTokensDetailsResult:
@@ -1680,7 +1678,7 @@ def get_token_type_cost_breakdown(
     object and model pricing alone.
 
     This works for every provider, including Perplexity/Cerebras/Dashscope whose
-    cost calculators bypass ``generic_cost_per_token``, because cache tokens always
+    cost calculators bypass ``cost_per_text``, because cache tokens always
     land on ``prompt_tokens_details`` (via the Usage constructor and provider
     transformations) and reasoning tokens on ``completion_tokens_details``. It reuses
     the same rate resolution as the total-cost path (``get_billed_token_rates``) so the
@@ -1875,7 +1873,7 @@ def calculate_image_response_cost_from_usage(
         completion_tokens_details=completion_tokens_details,
     )
 
-    prompt_cost, completion_cost = generic_cost_per_token(
+    prompt_cost, completion_cost = cost_per_text(
         model=model,
         usage=normalized_usage,
         custom_llm_provider=custom_llm_provider,
