@@ -2358,3 +2358,15 @@ def test_global_disable_flag_with_transform_messages_helper(
     )
 
     assert json.loads(route.calls.last.request.content)["messages"] == [{"role": "user", "content": content}]
+
+
+def test_a_fireworks_row_added_by_a_direct_write_is_matched(monkeypatch):
+    import litellm
+
+    monkeypatch.setitem(
+        litellm.model_cost,
+        "fireworks_ai/accounts/fireworks/models/acme-direct-9b",
+        {"litellm_provider": "fireworks_ai", "mode": "chat", "supports_vision": True},
+    )
+
+    assert FireworksAIConfig()._get_model_cost_capability("accounts/myorg/models/custom-acme-direct-9b", "supports_vision") is True
