@@ -56,7 +56,6 @@ import {
   teamMemberBudgetGate,
 } from "../shared/InheritedBudgetHint";
 import { KeyEditView } from "./key_edit_view";
-import { keyOrganizationId } from "./keyEditFieldNormalizers";
 import { isTeamAdminEditingMemberKey, teamAdminMemberKeyPayload } from "./teamAdminMemberKeyPayload";
 import { BudgetPeriodTooltip } from "@/components/shared/BudgetPeriodTooltip";
 
@@ -241,10 +240,6 @@ export default function KeyInfoView({
         delete formValues.disable_global_guardrails;
       }
 
-      if ((formValues.organization_id || null) === keyOrganizationId(currentKeyData)) {
-        delete formValues.organization_id;
-      }
-
       // Handle max budget empty string
       formValues.max_budget = mapEmptyStringToNull(formValues.max_budget);
 
@@ -403,9 +398,7 @@ export default function KeyInfoView({
 
       const newKeyValues = await keyUpdateCall(accessToken, formValues);
 
-      setCurrentKeyData((prevData) =>
-        prevData ? { ...prevData, ...newKeyValues, org_id: newKeyValues.organization_id } : undefined,
-      );
+      setCurrentKeyData((prevData) => (prevData ? { ...prevData, ...newKeyValues } : undefined));
       void queryClient.invalidateQueries({ queryKey: keyKeys.all });
 
       if (onKeyDataUpdate) {
@@ -553,7 +546,7 @@ export default function KeyInfoView({
   const lastConfiguredAt = currentKeyData.settings_updated_at || currentKeyData.created_at;
 
   const parentTeam = currentKeyData.team_id ? teamsData?.find((team) => team.team_id === currentKeyData.team_id) : null;
-  const orgId = keyOrganizationId(currentKeyData) || parentTeam?.organization_id || "";
+  const orgId = currentKeyData.organization_id || currentKeyData.org_id || parentTeam?.organization_id || "";
   const parentOrg = orgId ? organizations?.find((org) => org.organization_id === orgId) : null;
 
   const hasOwnBudget = currentKeyData.max_budget !== null;
@@ -986,7 +979,7 @@ export default function KeyInfoView({
 
                   <div>
                     <p className="text-sm font-medium">Organization</p>
-                    <p className="text-sm">{keyOrganizationId(currentKeyData) || "Not Set"}</p>
+                    <p className="text-sm">{(currentKeyData.organization_id ?? currentKeyData.org_id) || "Not Set"}</p>
                   </div>
 
                   <div>

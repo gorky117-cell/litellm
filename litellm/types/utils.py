@@ -4573,7 +4573,6 @@ class LlmProviders(str, Enum):
     POE = "poe"
     CHUTES = "chutes"
     NEOSANTARA = "neosantara"
-    AIAND = "aiand"
     PARASAIL = "parasail"
     XIAOMI_MIMO = "xiaomi_mimo"
     TENSORMESH = "tensormesh"

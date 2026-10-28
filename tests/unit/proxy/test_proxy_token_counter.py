@@ -364,7 +364,6 @@ async def test_anthropic_messages_count_tokens_endpoint():
         output_format=None,
         context_management=None,
         request_litellm_params=None,
-        client_oauth_token=None,
     ):
         assert call_endpoint == True, "Should be called with call_endpoint=True for Anthropic endpoint"
         assert request.model == "claude-3-sonnet-20240229"
@@ -445,7 +444,6 @@ async def test_anthropic_messages_count_tokens_with_non_anthropic_model():
         output_format=None,
         context_management=None,
         request_litellm_params=None,
-        client_oauth_token=None,
     ):
         assert call_endpoint == True, "Should be called with call_endpoint=True for Anthropic endpoint"
         assert request.model == "gpt-4"
@@ -1264,7 +1262,6 @@ async def test_anthropic_endpoint_returns_anthropic_error_format():
         output_format=None,
         context_management=None,
         request_litellm_params=None,
-        client_oauth_token=None,
     ):
         raise ProxyException(
             message='{"detail":{"message":"Input is too long for requested model."}}',
@@ -1322,7 +1319,6 @@ async def test_anthropic_endpoint_403_permission_error_format():
         output_format=None,
         context_management=None,
         request_litellm_params=None,
-        client_oauth_token=None,
     ):
         raise ProxyException(
             message='{"Message":"Bearer Token has expired"}',
@@ -1380,7 +1376,6 @@ async def test_anthropic_endpoint_429_rate_limit_error_format():
         output_format=None,
         context_management=None,
         request_litellm_params=None,
-        client_oauth_token=None,
     ):
         raise ProxyException(
             message="Rate limit exceeded",

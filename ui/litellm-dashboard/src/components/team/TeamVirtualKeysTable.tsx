@@ -92,7 +92,15 @@ export function TeamVirtualKeysTable({ teamId, teamAlias, organization }: TeamVi
 
   const { data: keys, isPending: isLoading, isFetching, refetch } = useKeys(pageIndex + 1, pageSize, keyListOptions);
 
-  const displayKeys = useMemo(() => keys?.keys ?? [], [keys?.keys]);
+  const displayKeys = useMemo(() => {
+    const kList = keys?.keys || [];
+    const orgId = organization?.organization_id;
+    if (!orgId) return kList;
+    return kList.map((k: KeyResponse) => ({
+      ...k,
+      organization_id: (k.organization_id ?? k.org_id) || orgId,
+    }));
+  }, [keys?.keys, organization?.organization_id]);
 
   const teamMemberBudgetTeamIds = useMemo(
     () => (displayKeys.some((key) => key.max_budget == null && Boolean(key.user_id)) ? [teamId] : []),
@@ -174,7 +182,7 @@ export function TeamVirtualKeysTable({ teamId, teamAlias, organization }: TeamVi
       },
       {
         id: "organization_id",
-        accessorFn: (key) => (key.organization_id ?? key.org_id) || organization?.organization_id || null,
+        accessorKey: "organization_id",
         header: "Organization ID",
         size: 140,
         enableSorting: false,
@@ -453,7 +461,7 @@ export function TeamVirtualKeysTable({ teamId, teamAlias, organization }: TeamVi
         },
       },
     ],
-    [expandedAccordions, teamMemberBudgets, teamId, organization?.organization_id],
+    [expandedAccordions, teamMemberBudgets, teamId],
   );
 
   const handleSortingChange = useCallback((updaterOrValue: React.SetStateAction<SortingState>) => {
