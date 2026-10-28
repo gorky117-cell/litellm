@@ -6082,9 +6082,6 @@ def get_provider_info(model: str, custom_llm_provider: str | None) -> ProviderSp
     return json_provider.provider_info if json_provider is not None and json_provider.provider_info else None
 
 
-_REPORTED_INVALID_ROWS: Final[set[str]] = set()  # mutable-ok: logs each bad live row once per process
-
-
 def _model_not_mapped_message(model: str, custom_llm_provider: str | None) -> str:
     return (
         f"This model isn't mapped yet. model={model}, custom_llm_provider={custom_llm_provider}. "
@@ -6193,15 +6190,12 @@ def get_model_info_helper(
                and strip it. Tried last so no model that already resolves through 1-6 can change.
             """
 
-            from litellm._catalog import CATALOG, Invalid, Missing
+            from litellm._catalog import CATALOG, Invalid, Missing, report_invalid
 
             resolution: Final = CATALOG.resolve(model, requested_provider)
             key: str | None = None if isinstance(resolution, Missing) else resolution.key
-            if isinstance(resolution, Invalid) and resolution.key not in _REPORTED_INVALID_ROWS:
-                _REPORTED_INVALID_ROWS.add(resolution.key)
-                verbose_logger.warning(
-                    "litellm.model_cost[%r] fails validation: %s", resolution.key, "; ".join(resolution.errors)
-                )
+            if isinstance(resolution, Invalid):
+                report_invalid(resolution)
             _model_info: dict[str, Any] | None = None if isinstance(resolution, Missing) else resolution.row()
 
             if _model_info is not None and key is not None and (_model_info.get("mode") or "chat") in _BACKFILL_MODES:
