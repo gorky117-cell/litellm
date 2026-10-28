@@ -34,7 +34,9 @@ mod _native {
     #[pymodule_export]
     use crate::logger::NativeDiagnosticProcessor;
     #[pymodule_export]
-    use crate::model_registry::{CatalogHandle, Installed, Parsed, RowError, Unavailable};
+    use crate::model_registry::{
+        Bundled, CatalogHandle, File, Installed, Parsed, Provenance, Remote, RowError, Unavailable,
+    };
     #[pymodule_export]
     use crate::routes::audio_transcription::{atranscription, transcription};
     #[pymodule_export]
@@ -157,6 +159,10 @@ mod tests {
                 "Parsed",
                 "Installed",
                 "Unavailable",
+                "Remote",
+                "File",
+                "Bundled",
+                "Provenance",
                 "RowError",
                 "RowErrorKind",
                 "NativeClickHouseSpendConfig",

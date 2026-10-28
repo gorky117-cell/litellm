@@ -1,20 +1,22 @@
+mod fetch;
 mod install;
 mod row_error;
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
+use std::time::SystemTime;
 
 use litellm_host_python::{release_gil, to_py};
 use litellm_model_catalog::wire::Fields;
-use litellm_model_catalog::{BUNDLED_REGISTRY, Catalog, IntegrityLimits, Layers};
+use litellm_model_catalog::{BUNDLED_REGISTRY, Catalog, Layers, Located};
+use litellm_model_catalog_refresh::{Source, git_blob_id};
 use parking_lot::Mutex;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyDict, PyModule};
 use serde::Serialize;
-use sha1::{Digest, Sha1};
 
+pub(crate) use fetch::{Bundled, File, Provenance, Remote};
 use install::{Record, write_into};
 pub(crate) use row_error::{RowError, RowErrorKind, row_error};
 
@@ -31,7 +33,7 @@ static BUNDLED: LazyLock<Arc<Contents>> = LazyLock::new(|| {
 
 static BUNDLED_REVISION: LazyLock<String> = LazyLock::new(|| git_blob_id(BUNDLED_REGISTRY));
 
-struct Contents {
+pub(crate) struct Contents {
     /// What install layers over bundled, rejected rows replaced or left out
     catalog: Arc<Catalog>,
     /// The document as written
@@ -47,6 +49,10 @@ pub(crate) struct Parsed {
     revision: String,
     #[pyo3(get)]
     etag: Option<String>,
+    /// `None` for the bundled map
+    source: Option<Source>,
+    /// When the load that produced this map started, main's `loaded_at`
+    started_at: SystemTime,
 }
 
 #[pyclass(frozen, module = "litellm.rust_bridge._native")]
@@ -69,11 +75,15 @@ pub(crate) struct Installed {
 pub(crate) struct Unavailable {
     #[pyo3(get)]
     reason: String,
+    /// Seconds to wait before retrying, set when the last reply was retryable
+    #[pyo3(get)]
+    retry_after: Option<f64>,
 }
 
 struct State {
     layers: Layers,
     record: Option<Record>,
+    provenance: Option<Provenance>,
 }
 
 #[pyclass(frozen, name = "Catalog", module = "litellm.rust_bridge._native")]
@@ -119,6 +129,18 @@ impl Parsed {
 }
 
 #[pymethods]
+impl Unavailable {
+    #[new]
+    #[pyo3(signature = (reason, retry_after = None))]
+    fn new(reason: String, retry_after: Option<f64>) -> Self {
+        Self {
+            reason,
+            retry_after,
+        }
+    }
+}
+
+#[pymethods]
 impl CatalogHandle {
     #[staticmethod]
     fn bound_to(module: Bound<'_, PyModule>, attr: String) -> Self {
@@ -128,49 +150,58 @@ impl CatalogHandle {
             state: Mutex::new(State {
                 layers: Layers::new(Arc::clone(&BUNDLED.catalog)),
                 record: None,
+                provenance: None,
             }),
         }
     }
 
     fn bundled(&self) -> Parsed {
-        Parsed {
-            contents: Arc::clone(&BUNDLED),
-            revision: BUNDLED_REVISION.clone(),
-            etag: None,
-        }
+        bundled()
     }
 
-    /// Parses a fetched body and applies main's whole-map checks against the bundled model count
-    #[staticmethod]
-    #[pyo3(signature = (body, *, etag, min_model_count, max_shrink_ratio))]
-    fn parse(
+    /// Fetches and validates `source` with no install, retrying up to `attempts` times
+    #[pyo3(signature = (source, *, timeout, attempts))]
+    fn fetch(
+        &self,
         py: Python<'_>,
-        body: PyBackedBytes,
-        etag: Option<String>,
-        min_model_count: usize,
-        max_shrink_ratio: f64,
+        source: &Bound<'_, PyAny>,
+        timeout: f64,
+        attempts: u32,
     ) -> PyResult<Py<PyAny>> {
-        let result = release_gil(py, || {
-            parse_remote(&body, min_model_count, max_shrink_ratio)
-        });
-        match result {
-            Ok((contents, revision)) => Ok(Parsed {
-                contents: Arc::new(contents),
-                revision,
-                etag,
-            }
+        fetch::fetch(py, fetch::requested(source)?, timeout, attempts)
+    }
+
+    /// Fetch with main's reload policy, 3 attempts of 5 s, then install
+    fn reload(&self, py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let requested = fetch::requested(source)?;
+        let env_forced = matches!(requested, fetch::Requested::Bundled);
+        let fetched = fetch::fetch(py, requested, 5.0, 3)?;
+        let Ok(fetched) = fetched.bind(py).cast::<Parsed>() else {
+            return Ok(fetched);
+        };
+        Ok(self
+            .install(py, fetched.get(), env_forced, None, None)?
             .into_pyobject(py)?
             .into_any()
-            .unbind()),
-            Err(reason) => Ok(Unavailable { reason }
-                .into_pyobject(py)?
-                .into_any()
-                .unbind()),
-        }
+            .unbind())
     }
 
-    /// Writes the composed rows into the dict bound to the attribute, never over a field the user owns
-    fn install(&self, py: Python<'_>, parsed: &Parsed) -> PyResult<Installed> {
+    /// Where the installed map came from, `None` before the first install
+    fn provenance(&self) -> Option<Provenance> {
+        self.state.lock().provenance.clone()
+    }
+
+    /// Writes the composed rows into the dict bound to the attribute, never over a field the user owns.
+    /// `env_forced`, `fallback_reason` and `url` are the provenance facts only the caller knows
+    #[pyo3(signature = (parsed, *, env_forced = false, fallback_reason = None, url = None))]
+    fn install(
+        &self,
+        py: Python<'_>,
+        parsed: &Parsed,
+        env_forced: bool,
+        fallback_reason: Option<String>,
+        url: Option<String>,
+    ) -> PyResult<Installed> {
         let bound = self.module.bind(py).getattr(self.attr.as_str())?;
         let dict = bound
             .cast::<PyDict>()
@@ -189,7 +220,12 @@ impl CatalogHandle {
         };
         let composed = release_gil(py, || layers.compose());
         let outcome = write_into(py, dict, &composed, &layers, record)?;
-        self.state.lock().record = Some(outcome.record);
+        let provenance = Provenance::of(parsed, env_forced, fallback_reason, url);
+        {
+            let mut state = self.state.lock();
+            state.record = Some(outcome.record);
+            state.provenance = Some(provenance);
+        }
         Ok(Installed {
             count: composed.len(),
             written: outcome.written,
@@ -199,47 +235,29 @@ impl CatalogHandle {
     }
 }
 
-fn parse_remote(
-    body: &[u8],
-    min_model_count: usize,
-    max_shrink_ratio: f64,
-) -> Result<(Contents, String), String> {
-    let limits = IntegrityLimits::new(min_model_count, max_shrink_ratio)
-        .ok_or_else(|| format!("invalid shrink ratio {max_shrink_ratio}"))?;
-    let loaded = Catalog::parse(body).map_err(|error| error.to_string())?;
-    loaded
-        .value
-        .check_size(BUNDLED.raw.model_count(), limits)
-        .map_err(|error| error.to_string())?;
-    let raw = Arc::new(loaded.value.clone());
-    let errors = loaded.errors.iter().map(row_error).collect();
-    let (catalog, rejections) = loaded
-        .value
-        .with_rejected_replaced(&loaded.errors, &BUNDLED.raw);
-    let rejected = rejections
-        .iter()
-        .flat_map(|rejection| rejection.errors.iter().copied().map(row_error))
-        .collect();
-    Ok((
-        Contents {
-            catalog: Arc::new(catalog),
-            raw,
-            errors,
-            rejected,
-        },
-        git_blob_id(body),
-    ))
+pub(crate) fn bundled() -> Parsed {
+    Parsed {
+        contents: Arc::clone(&BUNDLED),
+        revision: BUNDLED_REVISION.clone(),
+        etag: None,
+        source: None,
+        started_at: SystemTime::now(),
+    }
 }
 
-fn git_blob_id(body: &[u8]) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(format!("blob {}\0", body.len()).as_bytes());
-    hasher.update(body);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+/// A fetched document with the rejected rows replaced by bundled or left out
+pub(crate) fn remote(catalog: Catalog, errors: &[Located]) -> Contents {
+    let raw = Arc::new(catalog.clone());
+    let (catalog, rejections) = catalog.with_rejected_replaced(errors, &BUNDLED.raw);
+    Contents {
+        catalog: Arc::new(catalog),
+        raw,
+        errors: errors.iter().map(row_error).collect(),
+        rejected: rejections
+            .iter()
+            .flat_map(|rejection| rejection.errors.iter().copied().map(row_error))
+            .collect(),
+    }
 }
 
 fn served_rows(catalog: &Catalog) -> Vec<(String, String, Fields)> {
@@ -274,20 +292,5 @@ struct WrittenDocument<'a>(&'a Catalog);
 impl Serialize for WrittenDocument<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_map(self.0.written())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use rstest::rstest;
-
-    use super::*;
-
-    #[rstest]
-    fn the_revision_is_the_git_blob_id_of_the_body() {
-        assert_eq!(
-            git_blob_id(b"hello\n"),
-            "ce013625030ba8dba906f756967f9e9ca394464a"
-        );
     }
 }
